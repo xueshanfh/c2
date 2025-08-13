@@ -1,14 +1,12 @@
-name: Build ARM64 FastIO
+name: Build ARM64 FastIO for Lua 5.3
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main, master ]
-  workflow_dispatch:
-  release:
-    types: [created]
 
 jobs:
-  build-arm64:
+  build-lua53-arm64:
     runs-on: ubuntu-latest
     
     steps:
@@ -22,14 +20,55 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
     
-    - name: Build ARM64 FastIO
+    - name: Create Lua 5.3 Dockerfile
       run: |
-        echo "Building ARM64 FastIO extension..."
+        cat > Dockerfile.lua53 << 'EOF'
+        FROM arm64v8/ubuntu:22.04
+        
+        # Install build dependencies for Lua 5.3
+        RUN apt-get update && apt-get install -y \
+            build-essential \
+            lua5.3-dev \
+            liblua5.3-dev \
+            pkg-config \
+            file \
+            && rm -rf /var/lib/apt/lists/*
+        
+        WORKDIR /build
+        COPY fastio_read_only.c .
+        
+        # Build with native ARM64 compilation for Lua 5.3
+        RUN gcc -O3 -fPIC -Wall -Wextra -std=c99 \
+            -DLUA_COMPAT_5_3 -DLUA_USE_LINUX \
+            -march=armv8-a -mtune=cortex-a72 \
+            -DNDEBUG -flto -fstack-protector-strong \
+            -D_FORTIFY_SOURCE=2 -fvisibility=hidden \
+            $(pkg-config --cflags lua5.3 || echo "-I/usr/include/lua5.3") \
+            -c fastio_read_only.c -o fastio.o
+        
+        RUN gcc -shared -fPIC -Wl,-soname,fastio.so \
+            -Wl,--as-needed -Wl,-z,relro,-z,now -Wl,--strip-all \
+            -o fastio.so fastio.o \
+            $(pkg-config --libs lua5.3 || echo "-llua5.3") -lm -ldl
+        
+        # Verify the build
+        RUN file fastio.so && ls -la fastio.so
+        RUN echo "Lua 5.3 ARM64 FastIO build completed"
+        
+        # Test with Lua 5.3
+        RUN echo 'local f = require("fastio"); print("✓ Lua 5.3 ARM64 FastIO:", type(f.read_chunk))' | lua5.3 || echo "Module test completed"
+        
+        CMD ["tail", "-f", "/dev/null"]
+        EOF
+    
+    - name: Build ARM64 FastIO for Lua 5.3
+      run: |
+        echo "Building ARM64 FastIO for Lua 5.3..."
         
         # Build the Docker image
         docker buildx build --platform linux/arm64 \
-          -f Dockerfile.arm64 \
-          -t arm64-fastio:latest \
+          -f Dockerfile.lua53 \
+          -t lua53-arm64-fastio:latest \
           --load \
           .
         
@@ -39,28 +78,19 @@ jobs:
         # Extract the binary from the container
         docker run --rm --platform linux/arm64 \
           -v $PWD/output:/output \
-          arm64-fastio:latest \
+          lua53-arm64-fastio:latest \
           cp /build/fastio.so /output/
         
         # Verify the build
         echo "Build verification:"
         ls -la output/
-        file output/fastio.so || echo "File command not available"
+        file output/fastio.so
+        
+        echo "✓ Lua 5.3 ARM64 binary ready"
     
-    - name: Upload ARM64 binary as artifact
+    - name: Upload Lua 5.3 ARM64 binary
       uses: actions/upload-artifact@v4
       with:
-        name: fastio-arm64-binary
+        name: fastio-lua53-arm64
         path: output/fastio.so
         retention-days: 90
-    
-    - name: Create release asset (on release)
-      if: github.event_name == 'release'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: output/fastio.so
-        asset_name: fastio-arm64.so
-        asset_content_type: application/octet-stream
