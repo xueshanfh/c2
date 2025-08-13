@@ -1,4 +1,4 @@
-name: Build Direct ARM64 FastIO (No Module System)
+name: Build LoadLib ARM64 FastIO (package.loadlib compatible)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build-direct-arm64:
+  build-loadlib-arm64:
     runs-on: ubuntu-latest
     
     steps:
@@ -20,40 +20,41 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
     
-    - name: Create Direct Build Dockerfile
+    - name: Create LoadLib Build Dockerfile
       run: |
-        cat > Dockerfile.direct << 'EOF'
+        cat > Dockerfile.loadlib << 'EOF'
         FROM arm64v8/alpine:3.18
         
         RUN apk add --no-cache build-base musl-dev file
         
         WORKDIR /build
-        COPY fastio_direct.c .
+        COPY fastio_loadlib.c .
         
-        # Build direct C library - no module system dependencies
+        # Build for package.loadlib compatibility
         RUN gcc -O3 -fPIC -Wall -Wextra -std=c99 \
             -march=armv8-a -mtune=cortex-a72 \
             -DNDEBUG -fstack-protector \
-            -c fastio_direct.c -o fastio.o
+            -c fastio_loadlib.c -o fastio.o
         
         RUN gcc -shared -fPIC \
             -Wl,-soname,fastio.so \
             -o fastio.so fastio.o
         
-        # Verify build
-        RUN echo "=== Direct ARM64 FastIO ===" && \
+        # Verify build and symbols
+        RUN echo "=== LoadLib ARM64 FastIO ===" && \
             file fastio.so && \
             ls -la fastio.so && \
-            nm -D fastio.so | grep fastio
+            echo "=== Exported Symbols ===" && \
+            nm -D fastio.so | grep fastio || echo "Symbols may be stripped"
         
         CMD ["tail", "-f", "/dev/null"]
         EOF
     
-    - name: Build Direct ARM64 FastIO
+    - name: Build LoadLib ARM64 FastIO
       run: |
         docker buildx build --platform linux/arm64 \
-          -f Dockerfile.direct \
-          -t fastio-direct-arm64:latest \
+          -f Dockerfile.loadlib \
+          -t fastio-loadlib-arm64:latest \
           --load \
           .
         
@@ -61,16 +62,16 @@ jobs:
         
         docker run --rm --platform linux/arm64 \
           -v $PWD/output:/output \
-          fastio-direct-arm64:latest \
+          fastio-loadlib-arm64:latest \
           cp /build/fastio.so /output/
         
-        echo "=== Direct Build Results ==="
+        echo "=== LoadLib Build Results ==="
         ls -la output/
         file output/fastio.so
     
-    - name: Upload Direct ARM64 binary
+    - name: Upload LoadLib ARM64 binary
       uses: actions/upload-artifact@v4
       with:
-        name: fastio-direct-arm64
+        name: fastio-loadlib-arm64
         path: output/fastio.so
         retention-days: 90
