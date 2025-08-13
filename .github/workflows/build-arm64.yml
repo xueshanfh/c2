@@ -27,7 +27,7 @@ jobs:
         echo "Building ARM64 FastIO extension..."
         docker buildx build --platform linux/arm64 \
           -f Dockerfile.arm64 \
-          --output type=local,dest=./ \
+          --output type=local,dest=./output \
           .
         
         
@@ -36,7 +36,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: fastio-arm64-binary
-        path: fastio.so
+        path: output/fastio.so
         retention-days: 90
     
     - name: Create release asset (on release)
@@ -46,6 +46,6 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ github.event.release.upload_url }}
-        asset_path: fastio.so
+        asset_path: output/fastio.so
         asset_name: fastio-arm64.so
         asset_content_type: application/octet-stream
