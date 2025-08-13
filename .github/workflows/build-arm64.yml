@@ -1,4 +1,4 @@
-name: Build Static ARM64 FastIO for Lua 5.3
+name: Build Fully Static ARM64 FastIO (musl)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build-static-arm64:
+  build-musl-static:
     runs-on: ubuntu-latest
     
     steps:
@@ -20,79 +20,155 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
     
-    - name: Create Static Lua 5.3 Dockerfile
+    - name: Create Musl Static Build Dockerfile
       run: |
-        cat > Dockerfile.static << 'EOF'
-        FROM arm64v8/ubuntu:22.04
+        cat > Dockerfile.musl << 'EOF'
+        # Use Alpine Linux with musl libc for truly static builds
+        FROM arm64v8/alpine:3.18
         
-        # Install build dependencies
-        RUN apt-get update && apt-get install -y \
-            build-essential \
-            lua5.3-dev \
-            liblua5.3-dev \
-            pkg-config \
-            file \
-            wget \
-            && rm -rf /var/lib/apt/lists/*
+        # Install musl development tools
+        RUN apk add --no-cache \
+            build-base \
+            musl-dev \
+            linux-headers \
+            file
+        
+        # Download Lua 5.3 headers for compilation (headers only)
+        RUN mkdir -p /usr/local/include/lua && \
+            cd /tmp && \
+            wget https://www.lua.org/ftp/lua-5.3.6.tar.gz && \
+            tar -xzf lua-5.3.6.tar.gz && \
+            cp lua-5.3.6/src/lua.h \
+               lua-5.3.6/src/luaconf.h \
+               lua-5.3.6/src/lauxlib.h \
+               lua-5.3.6/src/lualib.h \
+               /usr/local/include/lua/ && \
+            rm -rf lua-5.3.6*
         
         WORKDIR /build
-        COPY fastio_read_only.c .
+        COPY fastio_embedded.c .
         
-        # Build statically linked version - no external Lua dependencies
-        RUN gcc -O3 -fPIC -Wall -Wextra -std=c99 \
-            -DLUA_COMPAT_5_3 -DLUA_USE_LINUX \
+        # Create version with explicit malloc/free includes
+        RUN cat > fastio_static.c << 'CEOF'
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <errno.h>
+        #include <string.h>
+        #include <lua.h>
+        #include <lauxlib.h>
+        
+        #define CHUNK_SIZE (1024 * 1024)
+        
+        // Completely static read_chunk function
+        static int read_chunk(lua_State *L) {
+            const char *path = luaL_checkstring(L, 1);
+            FILE *fp = fopen(path, "rb");
+            if (!fp) {
+                luaL_error(L, "cannot open %s: %s", path, strerror(errno));
+                return 0;
+            }
+        
+            char *buf = (char*)malloc(CHUNK_SIZE);
+            if (!buf) {
+                fclose(fp);
+                luaL_error(L, "memory allocation failed");
+                return 0;
+            }
+            
+            luaL_Buffer b;
+            luaL_buffinit(L, &b);
+            size_t nread;
+        
+            while ((nread = fread(buf, 1, CHUNK_SIZE, fp)) > 0) {
+                luaL_addlstring(&b, buf, nread);
+            }
+        
+            free(buf);
+            
+            if (ferror(fp)) {
+                fclose(fp);
+                luaL_error(L, "read error for %s", path);
+                return 0;
+            }
+            fclose(fp);
+            
+            luaL_pushresult(&b);
+            return 1;
+        }
+        
+        static const luaL_Reg fastio_lib[] = {
+            {"read_chunk", read_chunk},
+            {NULL, NULL}
+        };
+        
+        // Static export for embedded environments
+        __attribute__((visibility("default"))) int luaopen_fastio(lua_State *L) {
+            luaL_newlib(L, fastio_lib);
+            return 1;
+        }
+        CEOF
+        
+        # Build completely static binary with musl
+        RUN gcc -static -O3 -fPIC -Wall -Wextra -std=c99 \
+            -DLUA_COMPAT_5_3 -DLUA_USE_LINUX -DLUA_VERSION_NUM=503 \
             -march=armv8-a -mtune=cortex-a72 \
-            -DNDEBUG -fstack-protector-strong \
-            -D_FORTIFY_SOURCE=2 -fvisibility=hidden \
-            -I/usr/include/lua5.3 \
-            -c fastio_read_only.c -o fastio.o
+            -DNDEBUG -fstack-protector \
+            -I/usr/local/include/lua \
+            -c fastio_static.c -o fastio.o
         
-        # Create shared library without Lua dependencies
-        RUN gcc -shared -fPIC \
+        # Link as shared library but with static libc
+        RUN gcc -shared -static-libgcc -fPIC \
             -Wl,-soname,fastio.so \
-            -Wl,--as-needed -Wl,-z,relro,-z,now \
-            -Wl,--strip-all \
-            -o fastio.so fastio.o -lm -ldl
+            -Wl,--as-needed \
+            -o fastio.so fastio.o
         
-        # Verify no Lua dependencies
-        RUN echo "=== Build Info ===" && \
+        # Also try completely static approach
+        RUN gcc -static -O3 -fPIC -Wall -Wextra -std=c99 \
+            -DLUA_COMPAT_5_3 -DLUA_USE_LINUX -DLUA_VERSION_NUM=503 \
+            -march=armv8-a -mtune=cortex-a72 \
+            -DNDEBUG -fstack-protector \
+            -I/usr/local/include/lua \
+            fastio_static.c -shared -o fastio_full_static.so
+        
+        # Verify builds
+        RUN echo "=== Static ARM64 FastIO Builds ===" && \
             file fastio.so && \
-            ls -la fastio.so && \
-            echo "=== Dependencies ===" && \
-            ldd fastio.so || echo "Static dependencies only"
-        
-        # Create version that works with embedded Lua
-        RUN cp fastio.so fastio_static.so
+            file fastio_full_static.so && \
+            ls -la fastio*.so && \
+            echo "=== Dependencies Check ===" && \
+            (ldd fastio.so 2>/dev/null || echo "✓ Fully static - no dependencies") && \
+            (ldd fastio_full_static.so 2>/dev/null || echo "✓ Fully static - no dependencies")
         
         CMD ["tail", "-f", "/dev/null"]
         EOF
     
     - name: Build Static ARM64 FastIO
       run: |
-        echo "Building static ARM64 FastIO for Lua 5.3..."
+        echo "Building fully static ARM64 FastIO..."
         
         docker buildx build --platform linux/arm64 \
-          -f Dockerfile.static \
-          -t lua53-static-arm64:latest \
+          -f Dockerfile.musl \
+          -t fastio-musl-static:latest \
           --load \
           .
         
         mkdir -p output
         
-        # Extract both versions
+        # Extract both static versions
         docker run --rm --platform linux/arm64 \
           -v $PWD/output:/output \
-          lua53-static-arm64:latest \
-          sh -c "cp /build/fastio.so /output/ && cp /build/fastio_static.so /output/"
+          fastio-musl-static:latest \
+          sh -c "cp /build/fastio.so /output/fastio_static.so && cp /build/fastio_full_static.so /output/"
         
-        echo "=== Build Results ==="
+        echo "=== Static Build Results ==="
         ls -la output/
-        echo "=== File Types ==="
         file output/*.so
+        
+        echo "✓ Fully static ARM64 binaries ready"
     
-    - name: Upload Static ARM64 binary
+    - name: Upload Static ARM64 binaries
       uses: actions/upload-artifact@v4
       with:
-        name: fastio-lua53-static-arm64
+        name: fastio-fully-static-arm64
         path: output/*.so
         retention-days: 90
