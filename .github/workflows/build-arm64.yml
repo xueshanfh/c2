@@ -1,8 +1,11 @@
-name: Build ARM64 FastIO (Simple)
+name: Build ARM64 FastIO
+
 on:
-  workflow_dispatch:
   push:
     branches: [ main, master ]
+  workflow_dispatch:
+  release:
+    types: [created]
 
 jobs:
   build-arm64:
@@ -16,47 +19,48 @@ jobs:
       with:
         platforms: arm64
     
-    - name: Install cross-compilation tools
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y gcc-aarch64-linux-gnu
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
     
-    - name: Install ARM64 Lua headers
+    - name: Build ARM64 FastIO
       run: |
-        # Download and set up ARM64 Lua development files
-        wget http://ports.ubuntu.com/pool/main/l/lua5.4/lua5.4-dev_5.4.4-1ubuntu1_arm64.deb
-        sudo dpkg -x lua5.4-dev_5.4.4-1ubuntu1_arm64.deb /tmp/lua-arm64
+        echo "Building ARM64 FastIO extension..."
         
-        # Create symlinks for easy access
-        sudo mkdir -p /usr/aarch64-linux-gnu/include
-        sudo cp -r /tmp/lua-arm64/usr/include/lua5.4/* /usr/aarch64-linux-gnu/include/
+        # Build the Docker image
+        docker buildx build --platform linux/arm64 \
+          -f Dockerfile.arm64 \
+          -t arm64-fastio:latest \
+          --load \
+          .
+        
+        # Create output directory
+        mkdir -p output
+        
+        # Extract the binary from the container
+        docker run --rm --platform linux/arm64 \
+          -v $PWD/output:/output \
+          arm64-fastio:latest \
+          cp /build/fastio.so /output/
+        
+        # Verify the build
+        echo "Build verification:"
+        ls -la output/
+        file output/fastio.so || echo "File command not available"
     
-    - name: Cross-compile ARM64 FastIO
-      run: |
-        echo "Cross-compiling for ARM64..."
-        
-        # ARM64 cross-compilation
-        aarch64-linux-gnu-gcc -O3 -fPIC -Wall -Wextra -std=c99 \
-          -DLUA_COMPAT_5_3 -DLUA_USE_LINUX \
-          -march=armv8-a -mtune=cortex-a72 \
-          -DNDEBUG -fstack-protector-strong \
-          -D_FORTIFY_SOURCE=2 -fvisibility=hidden \
-          -I/usr/aarch64-linux-gnu/include \
-          -c fastio_read_only.c -o fastio.o
-        
-        aarch64-linux-gnu-gcc -shared -fPIC \
-          -Wl,-soname,fastio.so \
-          -Wl,--as-needed -Wl,-z,relro,-z,now \
-          -Wl,--strip-all \
-          -o fastio.so fastio.o -lm -ldl
-        
-        # Verify ARM64 binary
-        file fastio.so
-        ls -la fastio.so
-    
-    - name: Upload ARM64 binary
+    - name: Upload ARM64 binary as artifact
       uses: actions/upload-artifact@v4
       with:
-        name: fastio-arm64-simple
-        path: fastio.so
+        name: fastio-arm64-binary
+        path: output/fastio.so
         retention-days: 90
+    
+    - name: Create release asset (on release)
+      if: github.event_name == 'release'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: output/fastio.so
+        asset_name: fastio-arm64.so
+        asset_content_type: application/octet-stream
