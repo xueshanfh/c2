@@ -1,4 +1,4 @@
-name: Build LoadLib ARM64 FastIO (package.loadlib compatible)
+name: Build LuaJ ARM64 FastIO (System.load compatible)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build-loadlib-arm64:
+  build-luaj-arm64:
     runs-on: ubuntu-latest
     
     steps:
@@ -20,41 +20,43 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
     
-    - name: Create LoadLib Build Dockerfile
+    - name: Create LuaJ Build Dockerfile
       run: |
-        cat > Dockerfile.loadlib << 'EOF'
+        cat > Dockerfile.luaj << 'EOF'
         FROM arm64v8/alpine:3.18
         
         RUN apk add --no-cache build-base musl-dev file
         
         WORKDIR /build
-        COPY fastio_loadlib.c .
+        COPY fastio_luaj.c .
         
-        # Build for package.loadlib compatibility
+        # Build for LuaJ/System.load compatibility
         RUN gcc -O3 -fPIC -Wall -Wextra -std=c99 \
             -march=armv8-a -mtune=cortex-a72 \
             -DNDEBUG -fstack-protector \
-            -c fastio_loadlib.c -o fastio.o
+            -c fastio_luaj.c -o fastio.o
         
+        # Create shared library with proper exports
         RUN gcc -shared -fPIC \
             -Wl,-soname,fastio.so \
+            -Wl,--export-dynamic \
             -o fastio.so fastio.o
         
-        # Verify build and symbols
-        RUN echo "=== LoadLib ARM64 FastIO ===" && \
+        # Verify build and check exports
+        RUN echo "=== LuaJ ARM64 FastIO ===" && \
             file fastio.so && \
             ls -la fastio.so && \
-            echo "=== Exported Symbols ===" && \
-            nm -D fastio.so | grep fastio || echo "Symbols may be stripped"
+            echo "=== Function Exports ===" && \
+            nm -D fastio.so | grep -E "(fastio|luaopen)" || echo "Checking for symbols..."
         
         CMD ["tail", "-f", "/dev/null"]
         EOF
     
-    - name: Build LoadLib ARM64 FastIO
+    - name: Build LuaJ ARM64 FastIO
       run: |
         docker buildx build --platform linux/arm64 \
-          -f Dockerfile.loadlib \
-          -t fastio-loadlib-arm64:latest \
+          -f Dockerfile.luaj \
+          -t fastio-luaj-arm64:latest \
           --load \
           .
         
@@ -62,16 +64,16 @@ jobs:
         
         docker run --rm --platform linux/arm64 \
           -v $PWD/output:/output \
-          fastio-loadlib-arm64:latest \
+          fastio-luaj-arm64:latest \
           cp /build/fastio.so /output/
         
-        echo "=== LoadLib Build Results ==="
+        echo "=== LuaJ Build Results ==="
         ls -la output/
         file output/fastio.so
     
-    - name: Upload LoadLib ARM64 binary
+    - name: Upload LuaJ ARM64 binary
       uses: actions/upload-artifact@v4
       with:
-        name: fastio-loadlib-arm64
+        name: fastio-luaj-arm64
         path: output/fastio.so
         retention-days: 90
