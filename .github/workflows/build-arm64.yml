@@ -1,5 +1,4 @@
 name: Build ARM64 FastIO (Simple)
-
 on:
   workflow_dispatch:
   push:
