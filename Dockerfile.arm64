@@ -1,0 +1,28 @@
+FROM arm64v8/ubuntu:22.04
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    lua5.4-dev \
+    pkg-config \
+    file \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY fastio_read_only.c .
+
+# Build with native ARM64 compilation
+RUN gcc -O3 -fPIC -Wall -Wextra -std=c99 \
+    -DLUA_COMPAT_5_3 -DLUA_USE_LINUX \
+    -march=armv8-a -mtune=cortex-a72 \
+    -DNDEBUG -flto -fstack-protector-strong \
+    -D_FORTIFY_SOURCE=2 -fvisibility=hidden \
+    $(pkg-config --cflags lua5.4) \
+    -c fastio_read_only.c -o fastio.o
+
+RUN gcc -shared -fPIC -Wl,-soname,fastio.so \
+    -Wl,--as-needed -Wl,-z,relro,-z,now -Wl,--strip-all \
+    -o fastio.so fastio.o \
+    $(pkg-config --libs lua5.4) -lm -ldl
+
+RUN file fastio.so && ls -la fastio.so
