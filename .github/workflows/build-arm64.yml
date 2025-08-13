@@ -1,4 +1,4 @@
-name: Build Minimal ARM64 FastIO (No Lua API Dependencies)
+name: Build Direct ARM64 FastIO (No Module System)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build-minimal-arm64:
+  build-direct-arm64:
     runs-on: ubuntu-latest
     
     steps:
@@ -20,144 +20,57 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
     
-    - name: Create Minimal Build Dockerfile
+    - name: Create Direct Build Dockerfile
       run: |
-        cat > Dockerfile.minimal << 'EOF'
+        cat > Dockerfile.direct << 'EOF'
         FROM arm64v8/alpine:3.18
         
-        # Install minimal build tools
-        RUN apk add --no-cache \
-            build-base \
-            musl-dev \
-            file
+        RUN apk add --no-cache build-base musl-dev file
         
         WORKDIR /build
+        COPY fastio_direct.c .
         
-        # Create ultra-minimal version that doesn't use any Lua API functions
-        RUN cat > fastio_ultra_minimal.c << 'CEOF'
-        #include <stdio.h>
-        #include <stdlib.h>
-        #include <string.h>
-        #include <errno.h>
-        
-        typedef struct lua_State lua_State;
-        
-        #define CHUNK_SIZE (1024 * 1024)
-        
-        // Ultra-minimal read_chunk - no Lua API dependencies
-        static int read_chunk(lua_State *L) {
-            // This function will be called by Lua, but we can't use Lua API
-            // The host application must handle argument parsing and result setting
-            return 0;  // Placeholder - actual implementation depends on host
-        }
-        
-        // Export just the function pointer
-        __attribute__((visibility("default"))) 
-        int (*fastio_read_chunk_ptr)(lua_State *L) = read_chunk;
-        
-        // Alternative approach - export a simple C function
-        __attribute__((visibility("default"))) 
-        char* fastio_read_file(const char* path, size_t* size_out) {
-            FILE *fp = fopen(path, "rb");
-            if (!fp) return NULL;
-            
-            fseek(fp, 0, SEEK_END);
-            long file_size = ftell(fp);
-            fseek(fp, 0, SEEK_SET);
-            
-            if (file_size < 0) {
-                fclose(fp);
-                return NULL;
-            }
-            
-            char *buffer = (char*)malloc(file_size + 1);
-            if (!buffer) {
-                fclose(fp);
-                return NULL;
-            }
-            
-            size_t total_read = 0;
-            while (total_read < (size_t)file_size) {
-                size_t to_read = (file_size - total_read > CHUNK_SIZE) ? 
-                                CHUNK_SIZE : (file_size - total_read);
-                size_t nread = fread(buffer + total_read, 1, to_read, fp);
-                if (nread == 0) break;
-                total_read += nread;
-            }
-            
-            fclose(fp);
-            buffer[total_read] = '\0';
-            if (size_out) *size_out = total_read;
-            return buffer;
-        }
-        
-        __attribute__((visibility("default"))) 
-        void fastio_free_buffer(char* buffer) {
-            if (buffer) free(buffer);
-        }
-        
-        // Traditional entry point (may not work in restricted environments)
-        __attribute__((visibility("default"))) 
-        int luaopen_fastio(lua_State *L) {
-            return 0;  // Host must handle registration
-        }
-        CEOF
-        
-        # Build ultra-minimal static library
-        RUN gcc -static -O3 -fPIC -Wall -Wextra -std=c99 \
+        # Build direct C library - no module system dependencies
+        RUN gcc -O3 -fPIC -Wall -Wextra -std=c99 \
             -march=armv8-a -mtune=cortex-a72 \
             -DNDEBUG -fstack-protector \
-            -c fastio_ultra_minimal.c -o fastio.o
+            -c fastio_direct.c -o fastio.o
         
-        # Create shared library with minimal dependencies
-        RUN gcc -shared -static-libgcc -fPIC \
+        RUN gcc -shared -fPIC \
             -Wl,-soname,fastio.so \
             -o fastio.so fastio.o
         
-        # Also create a completely static version
-        RUN gcc -static -O3 -Wall -Wextra -std=c99 \
-            -march=armv8-a -mtune=cortex-a72 \
-            -DNDEBUG \
-            fastio_ultra_minimal.c -shared -o fastio_static.so || \
-            echo "Static build may not work, continuing..."
-        
-        # Verify builds
-        RUN echo "=== Minimal ARM64 FastIO Builds ===" && \
+        # Verify build
+        RUN echo "=== Direct ARM64 FastIO ===" && \
             file fastio.so && \
-            ls -la fastio*.so && \
-            echo "=== Symbol Check ===" && \
-            nm -D fastio.so | grep fastio || echo "Symbols may be stripped"
+            ls -la fastio.so && \
+            nm -D fastio.so | grep fastio
         
         CMD ["tail", "-f", "/dev/null"]
         EOF
     
-    - name: Build Minimal ARM64 FastIO
+    - name: Build Direct ARM64 FastIO
       run: |
-        echo "Building minimal ARM64 FastIO with no Lua API dependencies..."
-        
         docker buildx build --platform linux/arm64 \
-          -f Dockerfile.minimal \
-          -t fastio-minimal-arm64:latest \
+          -f Dockerfile.direct \
+          -t fastio-direct-arm64:latest \
           --load \
           .
         
         mkdir -p output
         
-        # Extract minimal binaries
         docker run --rm --platform linux/arm64 \
           -v $PWD/output:/output \
-          fastio-minimal-arm64:latest \
-          sh -c "cp /build/fastio.so /output/ && ls /build/fastio_static.so && cp /build/fastio_static.so /output/ || echo 'Static version not available'"
+          fastio-direct-arm64:latest \
+          cp /build/fastio.so /output/
         
-        echo "=== Minimal Build Results ==="
+        echo "=== Direct Build Results ==="
         ls -la output/
-        file output/*.so
-        
-        echo "✓ Minimal ARM64 binaries ready (no Lua API symbols)"
+        file output/fastio.so
     
-    - name: Upload Minimal ARM64 binaries
+    - name: Upload Direct ARM64 binary
       uses: actions/upload-artifact@v4
       with:
-        name: fastio-minimal-arm64-no-api
-        path: output/*.so
+        name: fastio-direct-arm64
+        path: output/fastio.so
         retention-days: 90
