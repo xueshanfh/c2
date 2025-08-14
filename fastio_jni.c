@@ -2,37 +2,44 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <jni.h>
 
-// Simple, fast file reading optimized for small-medium files
+// Ultra-fast file reading using direct system calls
 static jstring read_file_optimized(JNIEnv *env, const char *path) {
-    FILE *file = fopen(path, "rb");
-    if (!file) {
+    // Use open() instead of fopen() for less overhead
+    int fd = open(path, O_RDONLY);
+    if (fd == -1) {
         return NULL;
     }
     
-    // Get file size
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
+    // Get file size using fstat (faster than seek/tell)
+    struct stat st;
+    if (fstat(fd, &st) == -1) {
+        close(fd);
+        return NULL;
+    }
     
-    if (file_size <= 0) {
-        fclose(file);
+    size_t file_size = (size_t)st.st_size;
+    if (file_size == 0) {
+        close(fd);
         return (*env)->NewStringUTF(env, "");
     }
     
-    // Allocate buffer for entire file + null terminator
+    // Pre-allocate exact buffer size
     char *buffer = malloc(file_size + 1);
     if (!buffer) {
-        fclose(file);
+        close(fd);
         return NULL;
     }
     
-    // Read entire file in one operation
-    size_t bytes_read = fread(buffer, 1, file_size, file);
-    fclose(file);
+    // Read entire file with single read() syscall
+    ssize_t bytes_read = read(fd, buffer, file_size);
+    close(fd);
     
-    if (bytes_read != (size_t)file_size) {
+    if (bytes_read != (ssize_t)file_size) {
         free(buffer);
         return NULL;
     }
@@ -40,7 +47,7 @@ static jstring read_file_optimized(JNIEnv *env, const char *path) {
     // Null terminate
     buffer[file_size] = '\0';
     
-    // Create Java string
+    // Create Java string and clean up
     jstring result = (*env)->NewStringUTF(env, buffer);
     free(buffer);
     
