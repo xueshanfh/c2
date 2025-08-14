@@ -9,10 +9,92 @@
 #include <sys/mman.h>
 #include <jni.h>
 
-#define CHUNK_SIZE 1048576  // 1MB chunks for better performance
+#define CHUNK_SIZE 262144  // 256KB chunks for better stability
+#define MAX_MMAP_SIZE (100 * 1024 * 1024)  // Don't mmap files larger than 100MB
 
-// Memory-mapped file reading for maximum speed
-static jstring read_file_mmap(JNIEnv *env, const char *path) {
+// Safe chunked reading with proper error handling
+static jstring read_file_safe(JNIEnv *env, const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        return NULL;
+    }
+    
+    // Get file size using fseek/ftell for compatibility
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    
+    long file_size = ftell(file);
+    if (file_size < 0) {
+        fclose(file);
+        return NULL;
+    }
+    
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    
+    if (file_size == 0) {
+        fclose(file);
+        return (*env)->NewStringUTF(env, "");
+    }
+    
+    // For very large files, use streaming approach
+    if (file_size > MAX_MMAP_SIZE) {
+        fclose(file);
+        return NULL; // Reject files that are too large
+    }
+    
+    // Allocate buffer with extra space for null terminator
+    char *buffer = (char*)malloc(file_size + 1);
+    if (!buffer) {
+        fclose(file);
+        return NULL;
+    }
+    
+    // Read file in chunks
+    size_t total_read = 0;
+    size_t remaining = (size_t)file_size;
+    
+    while (remaining > 0 && !feof(file)) {
+        size_t to_read = (remaining > CHUNK_SIZE) ? CHUNK_SIZE : remaining;
+        size_t nread = fread(buffer + total_read, 1, to_read, file);
+        
+        if (nread == 0) {
+            if (ferror(file)) {
+                free(buffer);
+                fclose(file);
+                return NULL;
+            }
+            break; // EOF
+        }
+        
+        total_read += nread;
+        remaining -= nread;
+    }
+    
+    fclose(file);
+    
+    // Ensure null termination
+    buffer[total_read] = '\0';
+    
+    // Create Java string with explicit length
+    jstring result = (*env)->NewStringUTF(env, buffer);
+    free(buffer);
+    
+    // Check for JNI exceptions
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        return NULL;
+    }
+    
+    return result;
+}
+
+// Memory-mapped reading for smaller files only
+static jstring read_file_mmap_safe(JNIEnv *env, const char *path) {
     int fd = open(path, O_RDONLY);
     if (fd == -1) {
         return NULL;
@@ -25,12 +107,14 @@ static jstring read_file_mmap(JNIEnv *env, const char *path) {
     }
     
     size_t file_size = (size_t)st.st_size;
-    if (file_size == 0) {
+    
+    // Only use mmap for reasonably sized files
+    if (file_size == 0 || file_size > MAX_MMAP_SIZE) {
         close(fd);
-        return (*env)->NewStringUTF(env, "");
+        return NULL;
     }
     
-    // Memory map the entire file for fastest access
+    // Memory map the file
     void *mapped = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (mapped == MAP_FAILED) {
         close(fd);
@@ -40,89 +124,54 @@ static jstring read_file_mmap(JNIEnv *env, const char *path) {
     // Advise kernel for sequential reading
     madvise(mapped, file_size, MADV_SEQUENTIAL);
     
-    // Create Java string directly from mapped memory
-    jstring result = (*env)->NewStringUTF(env, (const char*)mapped);
+    // Create a null-terminated copy for safety
+    char *buffer = (char*)malloc(file_size + 1);
+    if (!buffer) {
+        munmap(mapped, file_size);
+        close(fd);
+        return NULL;
+    }
     
-    // Clean up
+    memcpy(buffer, mapped, file_size);
+    buffer[file_size] = '\0';
+    
+    // Clean up mmap
     munmap(mapped, file_size);
     close(fd);
     
-    return result;
-}
-
-// Fallback chunked reading for when mmap fails
-static jstring read_file_chunked(JNIEnv *env, const char *path) {
-    int fd = open(path, O_RDONLY);
-    if (fd == -1) {
-        return NULL;
-    }
-    
-    struct stat st;
-    if (fstat(fd, &st) == -1) {
-        close(fd);
-        return NULL;
-    }
-    
-    size_t file_size = (size_t)st.st_size;
-    if (file_size == 0) {
-        close(fd);
-        return (*env)->NewStringUTF(env, "");
-    }
-    
-    // Allocate buffer for entire file
-    char *buffer = (char*)malloc(file_size + 1);
-    if (!buffer) {
-        close(fd);
-        return NULL;
-    }
-    
-    // Use larger buffer for system read() calls
-    char read_buffer[CHUNK_SIZE];
-    size_t total_read = 0;
-    
-    while (total_read < file_size) {
-        size_t to_read = (file_size - total_read > CHUNK_SIZE) ? 
-                        CHUNK_SIZE : (file_size - total_read);
-        
-        ssize_t nread = read(fd, read_buffer, to_read);
-        if (nread <= 0) {
-            if (nread == -1) {
-                free(buffer);
-                close(fd);
-                return NULL;
-            }
-            break; // EOF
-        }
-        
-        // Copy to main buffer
-        memcpy(buffer + total_read, read_buffer, nread);
-        total_read += nread;
-    }
-    
-    close(fd);
-    
-    // Null terminate and create Java string
-    buffer[total_read] = '\0';
+    // Create Java string
     jstring result = (*env)->NewStringUTF(env, buffer);
     free(buffer);
     
+    // Check for JNI exceptions
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        return NULL;
+    }
+    
     return result;
 }
 
-// Core file reading implementation with optimizations
+// Core file reading implementation with fallback strategy
 static jstring read_file_native_impl(JNIEnv *env, jstring jpath) {
+    if (!jpath) {
+        return NULL;
+    }
+    
     // Convert Java string to C string
     const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
     if (!path) {
         return NULL;
     }
     
-    // Try memory mapping first (fastest)
-    jstring result = read_file_mmap(env, path);
+    jstring result = NULL;
     
-    // Fallback to chunked reading if mmap fails
+    // Try memory mapping for smaller files first
+    result = read_file_mmap_safe(env, path);
+    
+    // Fallback to safe file reading
     if (!result) {
-        result = read_file_chunked(env, path);
+        result = read_file_safe(env, path);
     }
     
     (*env)->ReleaseStringUTFChars(env, jpath, path);
