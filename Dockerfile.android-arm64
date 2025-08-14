@@ -1,4 +1,3 @@
-
 FROM ubuntu:22.04
 
 # Install Android NDK and build tools
@@ -7,7 +6,6 @@ RUN apt-get update && apt-get install -y \
     unzip \
     build-essential \
     file \
-    openjdk-11-jdk \
     && rm -rf /var/lib/apt/lists/*
 
 # Download and install Android NDK
@@ -19,31 +17,25 @@ RUN cd /opt && \
 
 ENV ANDROID_NDK_HOME=/opt/android-ndk
 ENV PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
-ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
 
 WORKDIR /build
 COPY fastio_jni.c .
 
-# Build pure JNI library for Android ARM64 without any Lua dependencies
+# Build JNI library for Android ARM64 with proper symbol export
 RUN aarch64-linux-android21-clang \
     -O3 -fPIC -Wall -Wextra -std=c99 \
-    -DANDROID -D__ANDROID_API__=21 \
     -march=armv8-a -mtune=cortex-a53 \
-    -DNDEBUG -flto -fvisibility=hidden \
-    -I${JAVA_HOME}/include -I${JAVA_HOME}/include/linux \
-    -static-libgcc -Wl,--no-undefined -Wl,--gc-sections \
+    -DNDEBUG -fdata-sections -ffunction-sections \
+    -Wl,--gc-sections -Wl,--no-undefined \
+    -Wl,--export-dynamic \
     -shared -o fastio.so fastio_jni.c
 
-# Strip the library to minimize size
-RUN ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip fastio.so
-
-# Verify the build
-RUN echo "=== Pure JNI Android ARM64 FastIO ===" && \
+# Verify the build and JNI symbols
+RUN echo "=== Android ARM64 JNI FastIO ===" && \
     file fastio.so && \
     ls -la fastio.so && \
-    echo "=== JNI Exported symbols ===" && \
-    ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm -D fastio.so | grep Java || echo "Checking JNI symbols..." && \
-    echo "=== Dependencies (should be minimal) ===" && \
-    ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf -d fastio.so || echo "Minimal dependencies"
+    echo "=== JNI Symbols Check ===" && \
+    nm -D fastio.so | grep "Java_" || echo "JNI symbols should be present" && \
+    objdump -T fastio.so | grep "Java_" || echo "Checking dynamic symbols..."
 
 CMD ["tail", "-f", "/dev/null"]
