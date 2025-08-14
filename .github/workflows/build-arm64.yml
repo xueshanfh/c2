@@ -1,4 +1,3 @@
-
 name: Build Pure JNI Android ARM64 FastIO
 
 on:
@@ -9,18 +8,18 @@ on:
 jobs:
   build-jni-android-arm64:
     runs-on: ubuntu-latest
-    
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up QEMU for ARM64
       uses: docker/setup-qemu-action@v3
       with:
         platforms: arm64
-    
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
-    
+
     - name: Build Pure JNI Android ARM64 FastIO
       run: |
         docker buildx build --platform linux/amd64 \
@@ -28,61 +27,61 @@ jobs:
           -t fastio-jni-android-arm64:latest \
           --load \
           .
-        
+
         mkdir -p output
-        
+
         docker run --rm \
           -v $PWD/output:/output \
           fastio-jni-android-arm64:latest \
           cp /build/fastio.so /output/
-        
+
         echo "=== Pure JNI Android ARM64 Build Results ==="
         ls -la output/
         file output/fastio.so
-        
+
         echo "=== JNI Symbol Check ==="
         docker run --rm \
           -v $PWD/output:/output \
           fastio-jni-android-arm64:latest \
           sh -c "nm -D /output/fastio.so 2>/dev/null | grep Java || readelf -Ws /output/fastio.so | grep Java || echo 'JNI symbols present'"
-        
+
         echo "=== Dependency Check ==="
         docker run --rm \
           -v $PWD/output:/output \
           fastio-jni-android-arm64:latest \
           sh -c "readelf -d /output/fastio.so 2>/dev/null || echo 'Pure JNI library with minimal dependencies'"
-    
+
     - name: Upload Pure JNI Android ARM64 binary
       uses: actions/upload-artifact@v4
       with:
         name: fastio-jni-android-arm64-pure
         path: output/fastio.so
         retention-days: 90
-        
+
     - name: Create Usage Instructions
       run: |
         cat > output/README.md << 'EOF'
         # Pure JNI FastIO for Android ARM64
-        
+
         ## Usage Instructions:
-        
+
         1. Push the fastio.so to your Android device:
            ```bash
            adb push fastio.so /data/local/tmp/
            ```
-        
+
         2. Your Smali patch should work with this JNI library:
            ```lua
            package.loadlib("/data/local/tmp/fastio.so", "fastio_read_chunk")
            ```
-        
+
         3. The library exports:
            - Java_lluaj_lib_PackageLib_00024loadlib_00024FastIOFunction_readFileNative
            - Java_FastIONative_readFileNative
-        
+
         4. This library has NO Lua API dependencies and works purely through JNI calls
            as expected by your LuaJ/PackageLib patch.
-        
+
         ## Features:
         - Pure JNI implementation
         - Android ARM64 compatible
@@ -90,7 +89,7 @@ jobs:
         - Fast chunked file reading
         - Compatible with restricted Android environments
         EOF
-    
+
     - name: Upload Instructions
       uses: actions/upload-artifact@v4
       with:
