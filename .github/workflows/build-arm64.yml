@@ -1,4 +1,4 @@
-name: Build Android ARM64 FastIO (Android NDK compatible)
+name: Build JNI ARM64 FastIO (Direct JNI for LuaJ)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build-android-arm64:
+  build-jni-arm64:
     runs-on: ubuntu-latest
     
     steps:
@@ -20,149 +20,63 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
     
-    - name: Create Android NDK Build Dockerfile
+    - name: Create JNI Build Dockerfile
       run: |
-        cat > Dockerfile.android << 'EOF'
-        # Use Ubuntu base for Android NDK
-        FROM ubuntu:22.04
+        cat > Dockerfile.jni << 'EOF'
+        FROM arm64v8/alpine:3.18
         
-        # Install dependencies
-        RUN apt-get update && apt-get install -y \
-            wget unzip build-essential file \
-            && rm -rf /var/lib/apt/lists/*
-        
-        # Download and install Android NDK
-        WORKDIR /opt
-        RUN wget https://dl.google.com/android/repository/android-ndk-r25c-linux.zip && \
-            unzip android-ndk-r25c-linux.zip && \
-            rm android-ndk-r25c-linux.zip
-        
-        ENV ANDROID_NDK_ROOT=/opt/android-ndk-r25c
-        ENV TOOLCHAIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
-        ENV CC=$TOOLCHAIN/bin/aarch64-linux-android21-clang
+        RUN apk add --no-cache build-base musl-dev file openjdk11-jdk
         
         WORKDIR /build
+        COPY fastio_jni.c .
         
-        # Create Android-compatible source
-        RUN cat > fastio_android.c << 'CEOF'
-        #include <stdio.h>
-        #include <stdlib.h>
-        #include <string.h>
-        #include <errno.h>
-        
-        typedef struct lua_State lua_State;
-        
-        extern void lua_pushstring(lua_State *L, const char *s);
-        extern void lua_pushlstring(lua_State *L, const char *s, size_t len);
-        extern void lua_pushnil(lua_State *L);
-        extern const char *lua_tolstring(lua_State *L, int idx, size_t *len);
-        
-        #define CHUNK_SIZE (1024 * 1024)
-        
-        static int android_read_chunk(lua_State *L) {
-            size_t len;
-            const char *path = lua_tolstring(L, 1, &len);
-            if (!path) {
-                lua_pushnil(L);
-                return 1;
-            }
-            
-            FILE *fp = fopen(path, "rb");
-            if (!fp) {
-                lua_pushnil(L);
-                return 1;
-            }
-            
-            fseek(fp, 0, SEEK_END);
-            long file_size = ftell(fp);
-            fseek(fp, 0, SEEK_SET);
-            
-            if (file_size < 0) {
-                fclose(fp);
-                lua_pushnil(L);
-                return 1;
-            }
-            
-            char *buffer = (char*)malloc(file_size + 1);
-            if (!buffer) {
-                fclose(fp);
-                lua_pushnil(L);
-                return 1;
-            }
-            
-            size_t total_read = 0;
-            while (total_read < (size_t)file_size) {
-                size_t to_read = (file_size - total_read > CHUNK_SIZE) ? 
-                                CHUNK_SIZE : (file_size - total_read);
-                size_t nread = fread(buffer + total_read, 1, to_read, fp);
-                if (nread == 0) {
-                    if (ferror(fp)) {
-                        free(buffer);
-                        fclose(fp);
-                        lua_pushnil(L);
-                        return 1;
-                    }
-                    break;
-                }
-                total_read += nread;
-            }
-            
-            fclose(fp);
-            buffer[total_read] = '\0';
-            
-            lua_pushlstring(L, buffer, total_read);
-            free(buffer);
-            return 1;
-        }
-        
-        __attribute__((visibility("default"))) 
-        int fastio_read_chunk(lua_State *L) {
-            return android_read_chunk(L);
-        }
-        CEOF
-        
-        # Build with Android NDK
-        RUN $CC -O3 -fPIC -Wall -Wextra -std=c99 \
-            -march=armv8-a \
+        # Get JNI headers
+        RUN find /usr/lib/jvm -name "jni.h" -exec dirname {} \; | head -1 > jni_path.txt
+        RUN JNI_PATH=$(cat jni_path.txt) && \
+            echo "Found JNI headers at: $JNI_PATH" && \
+            gcc -O3 -fPIC -Wall -Wextra -std=c99 \
+            -march=armv8-a -mtune=cortex-a72 \
             -DNDEBUG -fstack-protector \
-            -c fastio_android.c -o fastio.o
+            -I"$JNI_PATH" -I"$JNI_PATH/linux" \
+            -c fastio_jni.c -o fastio.o
         
-        RUN $CC -shared -fPIC \
+        # Create JNI shared library
+        RUN gcc -shared -fPIC \
             -Wl,-soname,fastio.so \
             -o fastio.so fastio.o
         
-        # Verify Android build
-        RUN echo "=== Android ARM64 FastIO ===" && \
+        # Verify JNI build
+        RUN echo "=== JNI ARM64 FastIO ===" && \
             file fastio.so && \
             ls -la fastio.so && \
-            echo "=== Android Dependencies ===" && \
-            (readelf -d fastio.so | grep NEEDED || echo "Minimal deps - good for Android")
+            echo "=== JNI Symbols ===" && \
+            nm -D fastio.so | grep Java || echo "JNI symbols may be present"
         
         CMD ["tail", "-f", "/dev/null"]
         EOF
     
-    - name: Build Android ARM64 FastIO
+    - name: Build JNI ARM64 FastIO
       run: |
-        docker buildx build --platform linux/amd64 \
-          -f Dockerfile.android \
-          -t fastio-android-ndk:latest \
+        docker buildx build --platform linux/arm64 \
+          -f Dockerfile.jni \
+          -t fastio-jni-arm64:latest \
           --load \
           .
         
         mkdir -p output
         
-        docker run --rm \
+        docker run --rm --platform linux/arm64 \
           -v $PWD/output:/output \
-          fastio-android-ndk:latest \
+          fastio-jni-arm64:latest \
           cp /build/fastio.so /output/
         
-        echo "=== Android Build Results ==="
+        echo "=== JNI Build Results ==="
         ls -la output/
         file output/fastio.so
     
-    - name: Upload Android ARM64 binary
+    - name: Upload JNI ARM64 binary
       uses: actions/upload-artifact@v4
       with:
-        name: fastio-android-arm64
+        name: fastio-jni-arm64
         path: output/fastio.so
         retention-days: 90
