@@ -10,9 +10,8 @@
 
 #define CHUNK_SIZE 65536
 
-// JNI function for FastIOFunction.readFileNative called from your Smali patch
-JNIEXPORT jstring JNICALL
-Java_lluaj_lib_PackageLib_00024loadlib_00024FastIOFunction_readFileNative(JNIEnv *env, jclass clazz, jstring jpath) {
+// Core file reading implementation
+static jstring read_file_native_impl(JNIEnv *env, jstring jpath) {
     // Convert Java string to C string
     const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
     if (!path) {
@@ -78,8 +77,14 @@ Java_lluaj_lib_PackageLib_00024loadlib_00024FastIOFunction_readFileNative(JNIEnv
     return result;
 }
 
-// Alternative JNI export for different class paths
+// EXACT JNI signature that matches your Smali code
+JNIEXPORT jstring JNICALL
+Java_luaj_lib_PackageLib_00024loadlib_00024FastIOFunction_readFileNative(JNIEnv *env, jclass clazz, jstring jpath) {
+    return read_file_native_impl(env, jpath);
+}
+
+// Alternative JNI export for simpler class paths
 JNIEXPORT jstring JNICALL
 Java_FastIONative_readFileNative(JNIEnv *env, jclass clazz, jstring jpath) {
-    return Java_lluaj_lib_PackageLib_00024loadlib_00024FastIOFunction_readFileNative(env, clazz, jpath);
+    return read_file_native_impl(env, jpath);
 }
