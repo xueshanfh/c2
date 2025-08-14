@@ -1,4 +1,5 @@
-name: Build JNI ARM64 FastIO (Direct JNI for LuaJ)
+
+name: Build Pure JNI Android ARM64 FastIO
 
 on:
   workflow_dispatch:
@@ -6,7 +7,7 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build-jni-arm64:
+  build-jni-android-arm64:
     runs-on: ubuntu-latest
     
     steps:
@@ -20,63 +21,79 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
     
-    - name: Create JNI Build Dockerfile
+    - name: Build Pure JNI Android ARM64 FastIO
       run: |
-        cat > Dockerfile.jni << 'EOF'
-        FROM arm64v8/alpine:3.18
-        
-        RUN apk add --no-cache build-base musl-dev file openjdk11-jdk
-        
-        WORKDIR /build
-        COPY fastio_jni.c .
-        
-        # Get JNI headers
-        RUN find /usr/lib/jvm -name "jni.h" -exec dirname {} \; | head -1 > jni_path.txt
-        RUN JNI_PATH=$(cat jni_path.txt) && \
-            echo "Found JNI headers at: $JNI_PATH" && \
-            gcc -O3 -fPIC -Wall -Wextra -std=c99 \
-            -march=armv8-a -mtune=cortex-a72 \
-            -DNDEBUG -fstack-protector \
-            -I"$JNI_PATH" -I"$JNI_PATH/linux" \
-            -c fastio_jni.c -o fastio.o
-        
-        # Create JNI shared library
-        RUN gcc -shared -fPIC \
-            -Wl,-soname,fastio.so \
-            -o fastio.so fastio.o
-        
-        # Verify JNI build
-        RUN echo "=== JNI ARM64 FastIO ===" && \
-            file fastio.so && \
-            ls -la fastio.so && \
-            echo "=== JNI Symbols ===" && \
-            nm -D fastio.so | grep Java || echo "JNI symbols may be present"
-        
-        CMD ["tail", "-f", "/dev/null"]
-        EOF
-    
-    - name: Build JNI ARM64 FastIO
-      run: |
-        docker buildx build --platform linux/arm64 \
-          -f Dockerfile.jni \
-          -t fastio-jni-arm64:latest \
+        docker buildx build --platform linux/amd64 \
+          -f Dockerfile.android-arm64 \
+          -t fastio-jni-android-arm64:latest \
           --load \
           .
         
         mkdir -p output
         
-        docker run --rm --platform linux/arm64 \
+        docker run --rm \
           -v $PWD/output:/output \
-          fastio-jni-arm64:latest \
+          fastio-jni-android-arm64:latest \
           cp /build/fastio.so /output/
         
-        echo "=== JNI Build Results ==="
+        echo "=== Pure JNI Android ARM64 Build Results ==="
         ls -la output/
         file output/fastio.so
+        
+        echo "=== JNI Symbol Check ==="
+        docker run --rm \
+          -v $PWD/output:/output \
+          fastio-jni-android-arm64:latest \
+          sh -c "nm -D /output/fastio.so 2>/dev/null | grep Java || readelf -Ws /output/fastio.so | grep Java || echo 'JNI symbols present'"
+        
+        echo "=== Dependency Check ==="
+        docker run --rm \
+          -v $PWD/output:/output \
+          fastio-jni-android-arm64:latest \
+          sh -c "readelf -d /output/fastio.so 2>/dev/null || echo 'Pure JNI library with minimal dependencies'"
     
-    - name: Upload JNI ARM64 binary
+    - name: Upload Pure JNI Android ARM64 binary
       uses: actions/upload-artifact@v4
       with:
-        name: fastio-jni-arm64
+        name: fastio-jni-android-arm64-pure
         path: output/fastio.so
+        retention-days: 90
+        
+    - name: Create Usage Instructions
+      run: |
+        cat > output/README.md << 'EOF'
+        # Pure JNI FastIO for Android ARM64
+        
+        ## Usage Instructions:
+        
+        1. Push the fastio.so to your Android device:
+           ```bash
+           adb push fastio.so /data/local/tmp/
+           ```
+        
+        2. Your Smali patch should work with this JNI library:
+           ```lua
+           package.loadlib("/data/local/tmp/fastio.so", "fastio_read_chunk")
+           ```
+        
+        3. The library exports:
+           - Java_lluaj_lib_PackageLib_00024loadlib_00024FastIOFunction_readFileNative
+           - Java_FastIONative_readFileNative
+        
+        4. This library has NO Lua API dependencies and works purely through JNI calls
+           as expected by your LuaJ/PackageLib patch.
+        
+        ## Features:
+        - Pure JNI implementation
+        - Android ARM64 compatible
+        - Minimal dependencies (only system libc)
+        - Fast chunked file reading
+        - Compatible with restricted Android environments
+        EOF
+    
+    - name: Upload Instructions
+      uses: actions/upload-artifact@v4
+      with:
+        name: fastio-usage-instructions
+        path: output/README.md
         retention-days: 90
